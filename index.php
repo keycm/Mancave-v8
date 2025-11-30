@@ -102,9 +102,38 @@ if (isset($_POST['ajax_action'])) {
 
 require_once __DIR__ . '/reset_mailer.php'; 
 
+// === NEW: RATING SUBMISSION LOGIC ===
+if (isset($_POST['submit_rating']) && isset($_SESSION['user_id'])) {
+    $booking_id = intval($_POST['rating_booking_id']);
+    $rating_score = intval($_POST['rating']);
+    $review_text = trim($_POST['review']);
+    $user_id = $_SESSION['user_id'];
+
+    if ($rating_score > 0 && !empty($review_text)) {
+        // 1. Insert into ratings
+        // Note: passing 0 for service_id as generic fallback since bookings track string service names
+        $stmt = $conn->prepare("INSERT INTO ratings (user_id, service_id, rating, review, created_at) VALUES (?, 0, ?, ?, NOW())");
+        $stmt->bind_param("iis", $user_id, $rating_score, $review_text);
+        
+        if ($stmt->execute()) {
+            // 2. Mark booking as rated
+            $upd = $conn->prepare("UPDATE bookings SET is_rated = 1 WHERE id = ? AND user_id = ?");
+            $upd->bind_param("ii", $booking_id, $user_id);
+            $upd->execute();
+            
+            $_SESSION['success_message'] = "Thank you for your feedback!";
+        } else {
+            $_SESSION['error_message'] = "Error saving review.";
+        }
+    }
+    header("Location: index.php");
+    exit;
+}
+
 // === FETCH USER DATA (Profile Pic & Favorites) ===
 $user_favorites = [];
 $user_profile_pic = ""; 
+$pending_rating_booking = null; // Store booking needing rating
 
 if (isset($_SESSION['user_id'])) {
     $uid = $_SESSION['user_id'];
@@ -126,6 +155,19 @@ if (isset($_SESSION['user_id'])) {
             $user_profile_pic = "https://ui-avatars.com/api/?name=" . urlencode($user_data['username']) . "&background=cd853f&color=fff&rounded=true&bold=true";
         }
     }
+
+    // === NEW: CHECK FOR COMPLETED BUT UNRATED BOOKINGS ===
+    // This query finds the most recent completed booking that hasn't been rated yet
+    $rating_check_sql = "SELECT id, service, artwork_id FROM bookings 
+                         WHERE user_id = ? AND status = 'completed' AND is_rated = 0 
+                         ORDER BY created_at DESC LIMIT 1";
+    $stmt = $conn->prepare($rating_check_sql);
+    $stmt->bind_param("i", $uid);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    if ($res->num_rows > 0) {
+        $pending_rating_booking = $res->fetch_assoc();
+    }
 }
 
 // === AJAX HANDLER FOR ARTIST DATA ===
@@ -140,7 +182,7 @@ if (isset($_GET['get_artist_data'])) {
     exit;
 }
 
-// === NEW: ACCOUNT VERIFICATION LOGIC (OTP) ===
+// === ACCOUNT VERIFICATION LOGIC (OTP) ===
 if (isset($_POST['verify_account'])) {
     $otp_input = trim($_POST['otp']);
     $email = $_SESSION['otp_email'] ?? '';
@@ -149,9 +191,8 @@ if (isset($_POST['verify_account'])) {
         $_SESSION['error_message'] = "Session expired. Please sign up again.";
     } elseif (empty($otp_input)) {
         $_SESSION['error_message'] = "Please enter the code.";
-        $_SESSION['show_verify_modal'] = true; // Keep modal open
+        $_SESSION['show_verify_modal'] = true; 
     } else {
-        // Check DB
         $stmt = $conn->prepare("SELECT id, account_activation_hash, reset_token_expires_at FROM users WHERE email = ?");
         $stmt->bind_param("s", $email);
         $stmt->execute();
@@ -166,17 +207,14 @@ if (isset($_POST['verify_account'])) {
             header("Location: index.php?login=1");
             exit;
         } else {
-            // Validate OTP and Expiry
-            // Note: reset_token_expires_at is reused for OTP expiry in signup logic
             $expiry = strtotime($user['reset_token_expires_at']);
             
             if (time() > $expiry) {
                 $_SESSION['error_message'] = "Code expired. Please register again.";
             } elseif ($user['account_activation_hash'] !== $otp_input) {
                 $_SESSION['error_message'] = "Incorrect code. Try again.";
-                $_SESSION['show_verify_modal'] = true; // Keep modal open
+                $_SESSION['show_verify_modal'] = true; 
             } else {
-                // Success: Activate Account
                 $upd = $conn->prepare("UPDATE users SET account_activation_hash = NULL, reset_token_expires_at = NULL WHERE id = ?");
                 $upd->bind_param("i", $user['id']);
                 
@@ -192,7 +230,6 @@ if (isset($_POST['verify_account'])) {
             }
         }
     }
-    // If we reach here, reload (usually with error and modal flag set)
     header("Location: index.php");
     exit;
 }
@@ -276,8 +313,6 @@ if (isset($_POST['sign'])) {
                         $mail->send();
                         $_SESSION['otp_email'] = $email;
                         $_SESSION['success_message'] = "Registration successful! Check your email for the code.";
-                        
-                        // === MODIFICATION: Show Modal instead of Redirect ===
                         $_SESSION['show_verify_modal'] = true; 
                         header("Location: index.php"); 
                         exit;
@@ -342,6 +377,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
     <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
     <style>
         /* === EXISTING STYLES === */
+        /* ... [Kept existing styles as is] ... */
         .user-dropdown.active .dropdown-content { display: block; animation: fadeIn 0.2s ease-out; }
         .notification-wrapper { position: relative; margin-left: 0; display: inline-block; }
         .notif-dropdown { display: none; position: absolute; right: -10px; top: 160%; width: 320px; background: white; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.15); border: 1px solid #eee; z-index: 1100; overflow: hidden; transform-origin: top right; animation: fadeIn 0.2s ease-out; }
@@ -452,6 +488,12 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         .form-group input:not(.friendly-input-group input), .form-group textarea { width: 100%; padding: 12px 15px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 15px; }
         .forgot-pass-link { text-decoration: none; color: #888; font-size: 0.85rem; font-weight: 600; transition: color 0.3s ease; }
         .forgot-pass-link:hover { color: var(--accent-orange); }
+
+        /* Star Rating Styles */
+        .star-rating { display: flex; flex-direction: row-reverse; justify-content: center; gap: 5px; margin-bottom: 20px; }
+        .star-rating input { display: none; }
+        .star-rating label { font-size: 2rem; color: #ddd; cursor: pointer; transition: 0.2s; }
+        .star-rating input:checked ~ label, .star-rating label:hover, .star-rating label:hover ~ label { color: #f39c12; }
     </style>
 </head>
 <body>
@@ -757,6 +799,9 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
                         <div>
                             <h5><?php echo htmlspecialchars($latest_review['username']); ?></h5>
                             <span>Verified Client</span>
+                            <div class="stars" style="color:#f39c12; font-size:0.8rem;">
+                                <?php for($i=0; $i<$latest_review['rating']; $i++) echo '<i class="fas fa-star"></i>'; ?>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1051,6 +1096,37 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         </div>
     </div>
 
+    <div class="modal-overlay" id="rateUsModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon" style="color: #f39c12; background: rgba(243, 156, 18, 0.1);">
+                <i class="fas fa-star"></i>
+            </div>
+            <h3>Rate Your Experience</h3>
+            <p>How was your experience with 
+                <strong id="rateBookingTitle">our service</strong>?
+            </p>
+            <form method="POST" action="index.php">
+                <input type="hidden" name="rating_booking_id" id="ratingBookingId">
+                <input type="hidden" name="submit_rating" value="1">
+                
+                <div class="star-rating">
+                    <input type="radio" id="star5" name="rating" value="5" /><label for="star5" title="Excellent">★</label>
+                    <input type="radio" id="star4" name="rating" value="4" /><label for="star4" title="Good">★</label>
+                    <input type="radio" id="star3" name="rating" value="3" /><label for="star3" title="Average">★</label>
+                    <input type="radio" id="star2" name="rating" value="2" /><label for="star2" title="Poor">★</label>
+                    <input type="radio" id="star1" name="rating" value="1" /><label for="star1" title="Terrible">★</label>
+                </div>
+
+                <div class="form-group">
+                    <textarea name="review" rows="3" required placeholder="Write a short review..." style="width:100%; border:1px solid #ddd; padding:10px; border-radius:8px;"></textarea>
+                </div>
+
+                <button type="submit" class="btn-friendly" style="background: linear-gradient(135deg, #f39c12, #e67e22);">Submit Feedback</button>
+            </form>
+        </div>
+    </div>
+
     <script>const isLoggedIn = <?php echo $loggedIn ? 'true' : 'false'; ?>;</script>
 
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
@@ -1066,6 +1142,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         const verifyAccountModal = document.getElementById('verifyAccountModal');
         const reserveModal = document.getElementById('reserveModal');
         const copyModal = document.getElementById('copyModal');
+        const rateUsModal = document.getElementById('rateUsModal');
         const closeBtns = document.querySelectorAll('.modal-close');
 
         function closeModal() { document.querySelectorAll('.modal-overlay').forEach(el => el.classList.remove('active')); }
@@ -1087,16 +1164,34 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         <?php if(isset($_GET['login'])): ?> loginModal.classList.add('active'); <?php endif; ?>
         <?php if(isset($_GET['signup'])): ?> signupModal.classList.add('active'); <?php endif; ?>
         
-        // AUTO OPEN VERIFY MODAL IF SESSION SET
         <?php if(isset($_SESSION['show_verify_modal'])): ?>
             verifyAccountModal.classList.add('active');
             <?php unset($_SESSION['show_verify_modal']); ?>
         <?php endif; ?>
 
+        // --- NEW: AUTO-TRIGGER RATE US MODAL ---
+        <?php if ($pending_rating_booking): ?>
+            document.addEventListener('DOMContentLoaded', () => {
+                const booking = <?php echo json_encode($pending_rating_booking); ?>;
+                document.getElementById('ratingBookingId').value = booking.id;
+                
+                // Determine display title (Service name or Artwork ID)
+                let displayTitle = booking.service;
+                if(!displayTitle && booking.artwork_id) displayTitle = "Artwork #" + booking.artwork_id;
+                
+                document.getElementById('rateBookingTitle').innerText = displayTitle || "our service";
+                
+                // Small delay for better UX
+                setTimeout(() => {
+                    rateUsModal.classList.add('active');
+                }, 1000);
+            });
+        <?php endif; ?>
+
         // --- FORGOT PASSWORD FLOW (AJAX) ---
+        // ... [Rest of your existing JS logic for Forgot/Reset/Cart/Favorite/Notifs] ...
         let resetEmail = '';
 
-        // Step 1: Send OTP
         document.getElementById('forgotForm').addEventListener('submit', function(e) {
             e.preventDefault();
             resetEmail = document.getElementById('resetEmail').value;
@@ -1122,7 +1217,6 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             }).catch(() => { btn.disabled = false; btn.innerHTML = originalText; alert('Error sending request.'); });
         });
 
-        // Step 2: Verify OTP
         document.getElementById('resetOtpForm').addEventListener('submit', function(e) {
             e.preventDefault();
             const otp = document.getElementById('otpCode').value;
@@ -1148,7 +1242,6 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             });
         });
 
-        // Step 3: Reset Password
         document.getElementById('newPasswordForm').addEventListener('submit', function(e) {
             e.preventDefault();
             const newPass = document.getElementById('newPass').value;
@@ -1179,7 +1272,6 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             });
         });
 
-        // --- RESERVATION ---
         window.openReserveModal = function(id, title) {
             if(!isLoggedIn) { loginModal.classList.add('active'); return; }
             document.getElementById('res_art_id').value = id;
@@ -1187,13 +1279,11 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             reserveModal.classList.add('active');
         }
 
-        // --- REQUEST COPY ---
         window.openCopyModal = function(title) {
             document.getElementById('copyMessage').value = "Hello, I am interested in requesting a copy or similar commission of the artwork: \"" + title + "\". Please contact me with details.";
             copyModal.classList.add('active');
         }
 
-        // --- INTERACTION: FAVORITES (AJAX) ---
         window.toggleFavorite = function(btn, id) {
             if(!isLoggedIn) { loginModal.classList.add('active'); return; }
             
@@ -1217,13 +1307,11 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             setTimeout(() => btn.classList.remove('animating'), 400);
         }
 
-        // --- INTERACTION: CART ANIMATION ---
         window.animateCart = function(btn) {
             btn.classList.add('animating');
             setTimeout(() => btn.classList.remove('animating'), 300);
         }
 
-        // --- NAVBAR & HEADER ---
         window.addEventListener('scroll', () => {
             const navbar = document.querySelector('.navbar');
             if(window.scrollY > 50) navbar.classList.add('scrolled');
@@ -1231,7 +1319,6 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         });
 
         document.addEventListener('DOMContentLoaded', () => {
-            // NEW: INQUIRY FORM LOADING ANIMATION
             const inquiryForm = document.getElementById('inquiryForm');
             if(inquiryForm) {
                 inquiryForm.addEventListener('submit', function(e) {
