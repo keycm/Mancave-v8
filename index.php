@@ -102,9 +102,60 @@ if (isset($_POST['ajax_action'])) {
 
 require_once __DIR__ . '/reset_mailer.php'; 
 
+// === NEW: HANDLE RATING SUBMISSION ===
+if (isset($_POST['submit_rating']) && isset($_SESSION['user_id'])) {
+    $booking_id = intval($_POST['booking_id']);
+    $rating = intval($_POST['rating']);
+    $review = trim($_POST['review']);
+    $user_id = $_SESSION['user_id'];
+
+    // 1. Verify this booking belongs to user, is completed, and not rated
+    $chk_sql = "SELECT id, service FROM bookings WHERE id = ? AND user_id = ? AND status = 'completed' AND is_rated = 0 LIMIT 1";
+    $chk_stmt = $conn->prepare($chk_sql);
+    $chk_stmt->bind_param("ii", $booking_id, $user_id);
+    $chk_stmt->execute();
+    $chk_res = $chk_stmt->get_result();
+
+    if ($row = $chk_res->fetch_assoc()) {
+        // 2. Try to map service name to service_id
+        $service_name = $row['service'];
+        $service_id = null;
+        
+        if (!empty($service_name)) {
+            $s_stmt = $conn->prepare("SELECT id FROM services WHERE name = ? LIMIT 1");
+            $s_stmt->bind_param("s", $service_name);
+            $s_stmt->execute();
+            $s_res = $s_stmt->get_result();
+            if ($s_row = $s_res->fetch_assoc()) {
+                $service_id = $s_row['id'];
+            }
+        }
+
+        // 3. Insert Rating
+        $ins_sql = "INSERT INTO ratings (user_id, service_id, rating, review, created_at) VALUES (?, ?, ?, ?, NOW())";
+        $ins_stmt = $conn->prepare($ins_sql);
+        $ins_stmt->bind_param("iiis", $user_id, $service_id, $rating, $review);
+        
+        if ($ins_stmt->execute()) {
+            // 4. Mark booking as rated
+            $upd_stmt = $conn->prepare("UPDATE bookings SET is_rated = 1 WHERE id = ?");
+            $upd_stmt->bind_param("i", $booking_id);
+            $upd_stmt->execute();
+            
+            $_SESSION['success_message'] = "Thank you for your feedback!";
+        } else {
+            $_SESSION['error_message'] = "Error saving review.";
+        }
+    }
+    // Refresh to clear post data
+    header("Location: index.php");
+    exit();
+}
+
 // === FETCH USER DATA (Profile Pic & Favorites) ===
 $user_favorites = [];
 $user_profile_pic = ""; 
+$rate_booking = null; // Booking waiting for rating
 
 if (isset($_SESSION['user_id'])) {
     $uid = $_SESSION['user_id'];
@@ -125,6 +176,13 @@ if (isset($_SESSION['user_id'])) {
         } else {
             $user_profile_pic = "https://ui-avatars.com/api/?name=" . urlencode($user_data['username']) . "&background=cd853f&color=fff&rounded=true&bold=true";
         }
+    }
+
+    // Check for Completed & Unrated Bookings
+    $rate_sql = "SELECT * FROM bookings WHERE user_id = $uid AND status = 'completed' AND is_rated = 0 ORDER BY created_at DESC LIMIT 1";
+    $rate_res = mysqli_query($conn, $rate_sql);
+    if ($rate_res && mysqli_num_rows($rate_res) > 0) {
+        $rate_booking = mysqli_fetch_assoc($rate_res);
     }
 }
 
@@ -323,6 +381,7 @@ $events_list = [];
 $sql_events = "SELECT * FROM events ORDER BY event_date ASC LIMIT 2";
 if ($res_events = mysqli_query($conn, $sql_events)) { while ($row = mysqli_fetch_assoc($res_events)) { $events_list[] = $row; } }
 
+// FETCH TESTIMONIALS (Ratings)
 $reviews_list = [];
 $sql_review = "SELECT r.*, u.username FROM ratings r JOIN users u ON r.user_id = u.id WHERE r.rating >= 4 ORDER BY RAND() LIMIT 3";
 if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch_assoc($res_review)) { $reviews_list[] = $row; } }
@@ -452,6 +511,12 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         .form-group input:not(.friendly-input-group input), .form-group textarea { width: 100%; padding: 12px 15px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 15px; }
         .forgot-pass-link { text-decoration: none; color: #888; font-size: 0.85rem; font-weight: 600; transition: color 0.3s ease; }
         .forgot-pass-link:hover { color: var(--accent-orange); }
+
+        /* Rating Stars */
+        .star-rating { display: flex; flex-direction: row-reverse; justify-content: center; gap: 5px; margin-bottom: 20px; }
+        .star-rating input { display: none; }
+        .star-rating label { font-size: 2rem; color: #ddd; cursor: pointer; transition: color 0.2s; }
+        .star-rating label:hover, .star-rating label:hover ~ label, .star-rating input:checked ~ label { color: #f39c12; }
     </style>
 </head>
 <body>
@@ -892,7 +957,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             <?php endif; ?>
             <form action="./" method="POST"> 
                 <div class="friendly-input-group">
-                    <input type="text" name="username" required placeholder="Full Name">
+                    <input type="text" name="username" required placeholder="Username">
                     <i class="fas fa-user"></i>
                 </div>
                 <div class="friendly-input-group">
@@ -1032,8 +1097,8 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
     <div class="modal-overlay" id="copyModal">
         <div class="modal-card">
             <button class="modal-close">×</button>
-            <h3 style="margin-bottom:5px;">Request a Copy</h3>
-            <p style="color:#666; margin-bottom:20px; font-size:0.9rem;">This piece is sold, but you can request a commissioned copy.</p>
+            <h3 style="margin-bottom:5px;">Request a Inquiry</h3>
+            <p style="color:#666; margin-bottom:20px; font-size:0.9rem;">This piece is sold, but you can request a commission.</p>
             <form action="inquire" method="POST"> <div class="form-group">
                     <label>Email Address</label>
                     <input type="email" name="email" required placeholder="Your email">
@@ -1051,6 +1116,37 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         </div>
     </div>
 
+    <?php if ($rate_booking): ?>
+    <div class="modal-overlay" id="ratingModal">
+        <div class="modal-card small">
+            <div class="modal-header-icon"><i class="fas fa-star" style="color: #f39c12;"></i></div>
+            <h3>Rate Your Experience</h3>
+            <p>How was your reservation for "<?php echo htmlspecialchars($rate_booking['service']); ?>"?</p>
+            
+            <form method="POST">
+                <input type="hidden" name="booking_id" value="<?php echo $rate_booking['id']; ?>">
+                
+                <div class="star-rating">
+                    <input type="radio" id="star5" name="rating" value="5" required/><label for="star5" title="Excellent">★</label>
+                    <input type="radio" id="star4" name="rating" value="4"/><label for="star4" title="Good">★</label>
+                    <input type="radio" id="star3" name="rating" value="3"/><label for="star3" title="Average">★</label>
+                    <input type="radio" id="star2" name="rating" value="2"/><label for="star2" title="Poor">★</label>
+                    <input type="radio" id="star1" name="rating" value="1"/><label for="star1" title="Very Poor">★</label>
+                </div>
+
+                <div class="form-group">
+                    <textarea name="review" class="form-control" rows="3" placeholder="Write a short review..." style="width:100%; padding:10px; border-radius:8px; border:1px solid #ddd;"></textarea>
+                </div>
+
+                <button type="submit" name="submit_rating" class="btn-friendly">Submit Feedback</button>
+                <div class="modal-footer-link">
+                    <a href="#" onclick="document.getElementById('ratingModal').classList.remove('active'); return false;" style="color:#999; font-weight:normal;">Maybe Later</a>
+                </div>
+            </form>
+        </div>
+    </div>
+    <?php endif; ?>
+
     <script>const isLoggedIn = <?php echo $loggedIn ? 'true' : 'false'; ?>;</script>
 
     <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
@@ -1066,6 +1162,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         const verifyAccountModal = document.getElementById('verifyAccountModal');
         const reserveModal = document.getElementById('reserveModal');
         const copyModal = document.getElementById('copyModal');
+        const ratingModal = document.getElementById('ratingModal');
         const closeBtns = document.querySelectorAll('.modal-close');
 
         function closeModal() { document.querySelectorAll('.modal-overlay').forEach(el => el.classList.remove('active')); }
@@ -1091,6 +1188,11 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         <?php if(isset($_SESSION['show_verify_modal'])): ?>
             verifyAccountModal.classList.add('active');
             <?php unset($_SESSION['show_verify_modal']); ?>
+        <?php endif; ?>
+
+        // AUTO OPEN RATING MODAL
+        <?php if ($rate_booking): ?>
+            setTimeout(() => { ratingModal.classList.add('active'); }, 1500);
         <?php endif; ?>
 
         // --- FORGOT PASSWORD FLOW (AJAX) ---
@@ -1375,3 +1477,4 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
     </script>
 </body>
 </html>
+}
