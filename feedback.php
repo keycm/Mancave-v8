@@ -1,3 +1,7 @@
+{
+type: uploaded file
+fileName: keycm/mancave-v8/Mancave-v8-87db8ec5eebc26258fa23dd8abd41bc2890923c6/feedback.php
+fullContent:
 <?php
 session_start();
 include 'config.php';
@@ -286,7 +290,7 @@ if ($res_rate = mysqli_query($conn, $sql_rate)) {
                                 <?php foreach ($ratings as $rate): ?>
                                 <tr>
                                     <td><strong><?= htmlspecialchars($rate['username'] ?? 'Guest') ?></strong></td>
-                                    <td><?= htmlspecialchars($rate['service_name'] ?? 'General Service') ?></td>
+                                    <td><?= htmlspecialchars($rate['service_name'] ?? 'General/Artwork') ?></td>
                                     <td>
                                         <div class="stars">
                                             <?php for($i=1; $i<=5; $i++): ?>
@@ -473,7 +477,7 @@ if ($res_rate = mysqli_query($conn, $sql_rate)) {
 
                                         li.querySelector('.btn-notif-close').addEventListener('click', (e) => {
                                             e.stopPropagation();
-                                            if(!confirm('Delete notification?')) return; // Could be replaced, but simple enough for small item
+                                            if(!confirm('Delete notification?')) return; 
                                             const formData = new FormData();
                                             formData.append('id', notif.id);
                                             fetch('delete_notifications.php', { method: 'POST', body: formData })
@@ -596,3 +600,4 @@ if ($res_rate = mysqli_query($conn, $sql_rate)) {
     </script>
 </body>
 </html>
+}
