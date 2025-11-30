@@ -225,7 +225,6 @@ if (isset($_POST['verify_account'])) {
             exit;
         } else {
             // Validate OTP and Expiry
-            // Note: reset_token_expires_at is reused for OTP expiry in signup logic
             $expiry = strtotime($user['reset_token_expires_at']);
             
             if (time() > $expiry) {
@@ -277,7 +276,7 @@ if (isset($_POST['login'])) {
             $_SESSION['username'] = $row['username'];
             $_SESSION['user_id'] = $row['id'];
             $_SESSION['role'] = $row['role'];
-            header("Location: " . ($row['role'] == 'admin' ? 'admin' : './')); 
+            header("Location: " . ($row['role'] == 'admin' ? 'admin.php' : './')); 
             exit();
         } else {
             $_SESSION['error_message'] = "Invalid password!";
@@ -334,12 +333,9 @@ if (isset($_POST['sign'])) {
                         $mail->send();
                         $_SESSION['otp_email'] = $email;
                         $_SESSION['success_message'] = "Registration successful! Check your email for the code.";
-                        
-                        // === MODIFICATION: Show Modal instead of Redirect ===
                         $_SESSION['show_verify_modal'] = true; 
                         header("Location: index.php"); 
                         exit;
-                        
                     } catch (Exception $e) {
                         $_SESSION['error_message'] = "Mailer Error: " . $mail->ErrorInfo;
                     }
@@ -360,8 +356,10 @@ $loggedIn = isset($_SESSION['username']);
 $seven_days_ago = date('Y-m-d', strtotime('-7 days'));
 $artworks = [];
 
+// [MODIFIED] Added fav_count to the query
 $sql_art = "SELECT a.*, 
-            (SELECT status FROM bookings b WHERE (b.artwork_id = a.id OR b.service = a.title) AND b.status IN ('approved', 'completed') ORDER BY b.id DESC LIMIT 1) as active_booking_status
+            (SELECT status FROM bookings b WHERE (b.artwork_id = a.id OR b.service = a.title) AND b.status IN ('approved', 'completed') ORDER BY b.id DESC LIMIT 1) as active_booking_status,
+            (SELECT COUNT(*) FROM favorites f WHERE f.artwork_id = a.id) as fav_count
             FROM artworks a
             WHERE (SELECT COUNT(*) FROM bookings b2 WHERE (b2.artwork_id = a.id OR b2.service = a.title) AND b2.status = 'completed' AND b2.preferred_date < '$seven_days_ago') = 0
             ORDER BY active_booking_status DESC, a.status ASC, a.id DESC LIMIT 3";
@@ -430,6 +428,8 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         .profile-img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 2px solid var(--accent); }
         .profile-name { font-weight: 700; font-size: 0.9rem; color: white; padding-right: 5px; }
         .navbar.scrolled .profile-name { color: var(--primary); }
+        
+        /* UPDATED HEART ANIMATION */
         @keyframes heartPump { 0% { transform: scale(1); } 50% { transform: scale(1.4); } 100% { transform: scale(1); } }
         @keyframes popBtn { 0% { transform: scale(1); } 50% { transform: scale(0.9); } 100% { transform: scale(1); } }
         .btn-heart.animating i { animation: heartPump 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
@@ -680,6 +680,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
                         $imgSrc = !empty($art['image_path']) ? 'uploads/'.$art['image_path'] : 'https://images.unsplash.com/photo-1578301978693-85fa9c0320b9?q=80&w=600&auto=format&fit=crop';
                         $isFav = in_array($art['id'], $user_favorites);
                         $heartIcon = $isFav ? 'fas fa-heart' : 'far fa-heart';
+                        $favCount = $art['fav_count'] ?? 0;
                     ?>
                     <div class="art-card-new" data-aos="fade-up">
                         <div class="art-img-wrapper-new">
@@ -708,8 +709,10 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
                                 <div class="action-btns-new">
                                     <button class="btn-circle btn-heart <?php echo $isFav ? 'active' : ''; ?>" 
                                             onclick="toggleFavorite(this, <?php echo $art['id']; ?>)" 
-                                            title="Toggle Favorite">
+                                            title="Toggle Favorite"
+                                            style="width:auto; padding:0 12px; border-radius:50px; display:flex; align-items:center; gap:5px;">
                                         <i class="<?php echo $heartIcon; ?>"></i>
+                                        <span class="fav-count" style="font-size:0.8rem; font-weight:700;"><?php echo $favCount; ?></span>
                                     </button>
                                     
                                     <?php if($isSold || $isReserved): ?>
@@ -801,8 +804,9 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
         <div class="container text-center">
             <h4 class="section-tag">Testimonials</h4>
             <h2 class="section-title mb-5">Client Stories</h2>
+            <div style="max-width: 750px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px;">
             <?php if(empty($reviews_list)): ?>
-                <div class="testimonial-box">
+                <div class="testimonial-box" style="margin-bottom: 20px;">
                     <div class="quote-icon"><i class="fas fa-quote-left"></i></div>
                     <p class="testimonial-text">"The team at ManCave helped me find the perfect centerpiece for my office. Their knowledge and service are unmatched."</p>
                     <div class="testimonial-author">
@@ -814,7 +818,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
                     </div>
                 </div>
             <?php else: foreach($reviews_list as $latest_review): ?>
-                <div class="testimonial-box">
+                <div class="testimonial-box" style="margin-bottom: 20px;">
                     <div class="quote-icon"><i class="fas fa-quote-left"></i></div>
                     <p class="testimonial-text">"<?php echo htmlspecialchars($latest_review['review']); ?>"</p>
                     <div class="testimonial-author">
@@ -826,6 +830,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
                     </div>
                 </div>
             <?php endforeach; endif; ?>
+            </div>
         </div>
     </section>
 
@@ -1300,21 +1305,27 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
             if(!isLoggedIn) { loginModal.classList.add('active'); return; }
             
             const icon = btn.querySelector('i');
+            const countSpan = btn.querySelector('.fav-count');
             const isLiked = btn.classList.contains('active');
             const action = isLiked ? 'remove_id' : 'add_id';
 
             btn.classList.add('animating');
+            
+            let currentCount = parseInt(countSpan.innerText || '0');
+
             if(isLiked) {
                 btn.classList.remove('active');
                 icon.classList.remove('fas'); icon.classList.add('far');
+                countSpan.innerText = Math.max(0, currentCount - 1);
             } else {
                 btn.classList.add('active');
                 icon.classList.remove('far'); icon.classList.add('fas');
+                countSpan.innerText = currentCount + 1;
             }
 
             const formData = new FormData();
             formData.append(action, id);
-            fetch('favorites', { method: 'POST', body: formData }); 
+            fetch('favorites.php', { method: 'POST', body: formData }); 
 
             setTimeout(() => btn.classList.remove('animating'), 400);
         }
@@ -1477,4 +1488,3 @@ if ($res_review = mysqli_query($conn, $sql_review)) { while ($row = mysqli_fetch
     </script>
 </body>
 </html>
-}
