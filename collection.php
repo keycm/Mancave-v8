@@ -4,7 +4,7 @@ include 'config.php';
 require_once __DIR__ . '/reset_mailer.php'; 
 
 // =================================================================
-// 1. AUTHENTICATION & ACCOUNT LOGIC (Copied from index.php)
+// 1. AUTHENTICATION & ACCOUNT LOGIC
 // =================================================================
 
 // --- AJAX HANDLER FOR FORGOT PASSWORD FLOW ---
@@ -254,7 +254,7 @@ if (isset($_POST['sign'])) {
 }
 
 // =================================================================
-// 2. EXISTING COLLECTION LOGIC (Preserved)
+// 2. COLLECTION LOGIC
 // =================================================================
 
 // --- FETCH USER FAVORITES ---
@@ -763,7 +763,14 @@ if ($loggedIn) {
                             
                             <div class="art-meta-row">
                                 <span class="artist-name"><?php echo htmlspecialchars($art['artist']); ?></span>
-                                <span class="art-dims">16" x 12"</span> 
+                                <?php if(!empty($art['year'])): ?>
+                                    <span class="art-year" style="font-size:0.9rem; color:#999;">, <?php echo htmlspecialchars($art['year']); ?></span>
+                                <?php endif; ?>
+                            </div>
+
+                            <div style="font-size:0.85rem; color:#777; margin-bottom:5px; display:flex; justify-content:space-between;">
+                                <span><?php echo !empty($art['medium']) ? htmlspecialchars($art['medium']) : ''; ?></span>
+                                <span><?php echo !empty($art['size']) ? htmlspecialchars($art['size']) : ''; ?></span>
                             </div>
                             
                             <div class="art-footer">
@@ -1236,7 +1243,7 @@ if ($loggedIn) {
                 notifBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     notifDropdown.classList.toggle('active');
-                    if(userDropdown) userDropdown.classList.remove('active');
+                    if (userDropdown) userDropdown.classList.remove('active');
                 });
 
                 function fetchNotifications() {
@@ -1260,7 +1267,7 @@ if ($loggedIn) {
                                         item.innerHTML = `
                                             <div class="notif-msg">${notif.message}</div>
                                             <div class="notif-time">${notif.created_at}</div>
-                                            <button class="btn-notif-close">×</button>
+                                            <button class="btn-notif-close" title="Delete">×</button>
                                         `;
                                         
                                         item.addEventListener('click', (e) => {
