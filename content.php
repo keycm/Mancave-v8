@@ -262,25 +262,28 @@ if($res_artist = mysqli_query($conn, "SELECT * FROM artists ORDER BY name ASC"))
 
                         <div class="form-group">
                             <label>Category</label>
-                            <select id="art-category" name="category">
-                                <option value="Oil Painting">Oil Painting</option>
-                                <option value="Acrylic">Acrylic</option>
-                                <option value="Sculpture">Sculpture</option>
-                                <option value="Digital Art">Digital Art</option>
-                            </select>
+                            <input type="text" id="art-category" name="category" placeholder="e.g. Oil Painting, Abstract">
                         </div>
+
                         <div class="form-row">
+                            <div class="form-group">
+                                <label>Medium</label>
+                                <input type="text" id="art-medium" name="medium" placeholder="e.g. Canvas, Paper">
+                            </div>
+                            <div class="form-group">
+                                <label>Year</label>
+                                <input type="number" id="art-year" name="year" placeholder="e.g. 2024">
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>Size</label>
+                                <input type="text" id="art-size" name="size" placeholder="e.g. 24x36 inches">
+                            </div>
                             <div class="form-group">
                                 <label>Price (PHP)</label>
                                 <input type="number" id="art-price" name="price" step="0.01" required placeholder="0.00">
-                            </div>
-                            <div class="form-group">
-                                <label>Status</label>
-                                <select id="art-status" name="status">
-                                    <option value="Available">Available</option>
-                                    <option value="Reserved">Reserved</option>
-                                    <option value="Sold">Sold</option>
-                                </select>
                             </div>
                         </div>
                         <div class="form-group">
@@ -300,13 +303,17 @@ if($res_artist = mysqli_query($conn, "SELECT * FROM artists ORDER BY name ASC"))
                     <div class="card-header"><h3>Current Inventory</h3></div>
                     <div class="table-responsive">
                         <table class="styled-table">
-                            <thead><tr><th>Image</th><th>Details</th><th>Status</th><th>Actions</th></tr></thead>
+                            <thead><tr><th>Image</th><th>Details</th><th>Size</th><th>Actions</th></tr></thead>
                             <tbody>
                                 <?php foreach ($artworks as $art): $img = !empty($art['image_path']) ? 'uploads/'.$art['image_path'] : 'https://placehold.co/50'; ?>
                                 <tr id="art-row-<?= $art['id'] ?>">
                                     <td><img src="<?= htmlspecialchars($img) ?>" class="thumb-img"></td>
                                     <td><div class="item-title"><?= htmlspecialchars($art['title']) ?></div><span class="item-meta">By <?= htmlspecialchars($art['artist']) ?></span></td>
-                                    <td><span class="status-badge status-<?= strtolower($art['status']) ?>"><?= $art['status'] ?></span></td>
+                                    <td>
+                                        <span style="font-weight:700; color:var(--secondary); font-size:0.9rem;">
+                                            <?= htmlspecialchars($art['size'] ?? 'N/A') ?>
+                                        </span>
+                                    </td>
                                     <td>
                                         <div class="actions">
                                             <button class="btn-icon edit" onclick='editArtwork(<?= json_encode($art) ?>)'><i class="fas fa-pen"></i></button>
@@ -727,9 +734,14 @@ if($res_artist = mysqli_query($conn, "SELECT * FROM artists ORDER BY name ASC"))
             document.getElementById('art-title').value = art.title;
             document.getElementById('art-artist').value = art.artist; 
             document.getElementById('art-price').value = art.price;
-            document.getElementById('art-status').value = art.status;
             document.getElementById('art-desc').value = art.description;
+            
+            // UPDATED: Populate new fields
             if(art.category) document.getElementById('art-category').value = art.category;
+            if(art.medium) document.getElementById('art-medium').value = art.medium;
+            if(art.year) document.getElementById('art-year').value = art.year;
+            if(art.size) document.getElementById('art-size').value = art.size;
+            // Note: art.status removed as requested
             
             document.getElementById('artFormTitle').textContent = 'Edit Artwork';
             document.getElementById('art-btn-text').textContent = 'Update Artwork';
