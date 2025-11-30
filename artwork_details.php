@@ -1,6 +1,7 @@
 <?php
 session_start();
 include 'config.php';
+require_once __DIR__ . '/reset_mailer.php'; 
 
 // Check if ID is provided
 if (!isset($_GET['id'])) {
@@ -10,6 +11,252 @@ if (!isset($_GET['id'])) {
 
 $id = intval($_GET['id']);
 $loggedIn = isset($_SESSION['username']);
+
+// =================================================================
+// 1. AUTHENTICATION & ACCOUNT LOGIC (Adapted for this page)
+// =================================================================
+
+// --- AJAX HANDLER FOR FORGOT PASSWORD FLOW ---
+if (isset($_POST['ajax_action'])) {
+    header('Content-Type: application/json');
+    $action = $_POST['ajax_action'];
+    $response = ['status' => 'error', 'message' => 'An error occurred.'];
+
+    try {
+        if ($action === 'send_reset_otp') {
+            $email = $_POST['email'] ?? '';
+            
+            $stmt = $conn->prepare("SELECT id, username FROM users WHERE email = ?");
+            $stmt->bind_param("s", $email);
+            $stmt->execute();
+            $res = $stmt->get_result();
+            
+            if ($res->num_rows > 0) {
+                $user = $res->fetch_assoc();
+                $otp = random_int(100000, 999999);
+                $otp_hash = hash("sha256", $otp); 
+                $expiry = date("Y-m-d H:i:s", time() + 60 * 15); 
+
+                $update = $conn->prepare("UPDATE users SET reset_token_hash = ?, reset_token_expires_at = ? WHERE id = ?");
+                $update->bind_param("ssi", $otp_hash, $expiry, $user['id']);
+                
+                if ($update->execute()) {
+                    $mail = require __DIR__ . '/reset_mailer.php';
+                    $mail->setFrom("noreply@example.com", "ManCave Gallery");
+                    $mail->addAddress($email);
+                    $mail->Subject = "Password Reset OTP";
+                    $mail->isHTML(true);
+                    $mail->Body = "
+                        <h3>Password Reset Request</h3>
+                        <p>Hi " . htmlspecialchars($user['username']) . ",</p>
+                        <p>Your OTP code to reset your password is:</p>
+                        <h2 style='background: #eee; padding: 10px; display: inline-block;'>$otp</h2>
+                        <p>This code expires in 15 minutes.</p>
+                    ";
+                    $mail->send();
+                    $response = ['status' => 'success', 'message' => 'OTP sent to your email.'];
+                }
+            } else {
+                $response = ['status' => 'error', 'message' => 'Email not found.'];
+            }
+        } 
+        elseif ($action === 'verify_reset_otp') {
+            $email = $_POST['email'] ?? '';
+            $otp = $_POST['otp'] ?? '';
+            $otp_hash = hash("sha256", $otp);
+
+            $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND reset_token_hash = ? AND reset_token_expires_at > NOW()");
+            $stmt->bind_param("ss", $email, $otp_hash);
+            $stmt->execute();
+            if ($stmt->get_result()->num_rows > 0) {
+                $response = ['status' => 'success', 'message' => 'OTP verified.'];
+            } else {
+                $response = ['status' => 'error', 'message' => 'Invalid or expired OTP.'];
+            }
+        }
+        elseif ($action === 'reset_password') {
+            $email = $_POST['email'] ?? '';
+            $otp = $_POST['otp'] ?? '';
+            $new_pass = $_POST['new_password'] ?? '';
+            $confirm_pass = $_POST['confirm_password'] ?? '';
+            $otp_hash = hash("sha256", $otp);
+
+            if ($new_pass !== $confirm_pass) {
+                $response = ['status' => 'error', 'message' => 'Passwords do not match.'];
+            } elseif (strlen($new_pass) < 8) {
+                $response = ['status' => 'error', 'message' => 'Password must be at least 8 characters.'];
+            } else {
+                $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND reset_token_hash = ? AND reset_token_expires_at > NOW()");
+                $stmt->bind_param("ss", $email, $otp_hash);
+                $stmt->execute();
+                
+                if ($stmt->get_result()->num_rows > 0) {
+                    $new_hash = password_hash($new_pass, PASSWORD_DEFAULT);
+                    $update = $conn->prepare("UPDATE users SET password = ?, reset_token_hash = NULL, reset_token_expires_at = NULL WHERE email = ?");
+                    $update->bind_param("ss", $new_hash, $email);
+                    if ($update->execute()) {
+                        $response = ['status' => 'success', 'message' => 'Password reset successfully.'];
+                    }
+                } else {
+                    $response = ['status' => 'error', 'message' => 'Session expired. Please try again.'];
+                }
+            }
+        }
+    } catch (Exception $e) {
+        $response = ['status' => 'error', 'message' => 'Server error: ' . $e->getMessage()];
+    }
+    
+    echo json_encode($response);
+    exit;
+}
+
+// --- ACCOUNT VERIFICATION LOGIC (OTP) ---
+if (isset($_POST['verify_account'])) {
+    $otp_input = trim($_POST['otp']);
+    $email = $_SESSION['otp_email'] ?? '';
+
+    if (empty($email)) {
+        $_SESSION['error_message'] = "Session expired. Please sign up again.";
+    } elseif (empty($otp_input)) {
+        $_SESSION['error_message'] = "Please enter the code.";
+        $_SESSION['show_verify_modal'] = true; 
+    } else {
+        $stmt = $conn->prepare("SELECT id, account_activation_hash, reset_token_expires_at FROM users WHERE email = ?");
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $user_res = $stmt->get_result();
+        $user = $user_res->fetch_assoc();
+
+        if (!$user) {
+            $_SESSION['error_message'] = "Account not found.";
+        } elseif ($user['account_activation_hash'] == NULL) {
+            $_SESSION['success_message'] = "Account already verified. Please Login.";
+            unset($_SESSION['otp_email']);
+            header("Location: artwork_details.php?id=$id&login=1");
+            exit;
+        } else {
+            $expiry = strtotime($user['reset_token_expires_at']);
+            
+            if (time() > $expiry) {
+                $_SESSION['error_message'] = "Code expired. Please register again.";
+            } elseif ($user['account_activation_hash'] !== $otp_input) {
+                $_SESSION['error_message'] = "Incorrect code. Try again.";
+                $_SESSION['show_verify_modal'] = true; 
+            } else {
+                $upd = $conn->prepare("UPDATE users SET account_activation_hash = NULL, reset_token_expires_at = NULL WHERE id = ?");
+                $upd->bind_param("i", $user['id']);
+                if ($upd->execute()) {
+                    $_SESSION['success_message'] = "Account verified! Please login.";
+                    unset($_SESSION['otp_email']);
+                    unset($_SESSION['show_verify_modal']);
+                    header("Location: artwork_details.php?id=$id&login=1");
+                    exit;
+                } else {
+                    $_SESSION['error_message'] = "Database error.";
+                }
+            }
+        }
+    }
+    header("Location: artwork_details.php?id=$id");
+    exit;
+}
+
+// --- LOGIN LOGIC ---
+if (isset($_POST['login'])) {     
+    $identifier = $_POST['identifier'];     
+    $password = $_POST['password'];      
+    $sql = "SELECT * FROM users WHERE username=? OR email=? LIMIT 1";     
+    $stmt = mysqli_prepare($conn, $sql);
+    mysqli_stmt_bind_param($stmt, "ss", $identifier, $identifier);
+    mysqli_stmt_execute($stmt);
+    $result = mysqli_stmt_get_result($stmt);     
+    if ($result && mysqli_num_rows($result) === 1) {
+        $row = mysqli_fetch_assoc($result);
+        if (!empty($row['account_activation_hash'])) {
+            $_SESSION['error_message'] = "Account not activated. Enter the code sent to your email.";
+            $_SESSION['otp_email'] = $row['email'];
+            $_SESSION['show_verify_modal'] = true; 
+            header("Location: artwork_details.php?id=$id");
+            exit();
+        }
+        if (password_verify($password, $row['password'])) {
+            $_SESSION['username'] = $row['username'];
+            $_SESSION['user_id'] = $row['id'];
+            $_SESSION['role'] = $row['role'];
+            header("Location: artwork_details.php?id=$id"); 
+            exit();
+        } else {
+            $_SESSION['error_message'] = "Invalid password!";
+        }
+    } else {
+        $_SESSION['error_message'] = "User not found!";
+    }
+    if(isset($_SESSION['error_message'])) {
+        header("Location: artwork_details.php?id=$id&login=1");
+        exit();
+    }
+} 
+
+// --- SIGNUP LOGIC ---
+if (isset($_POST['sign'])) {
+    $name = trim($_POST['username']);
+    $email = trim($_POST['email']);
+    $password = $_POST['password'];
+    $confirm_password = $_POST['confirm_password'];
+  
+    if (empty($name) || empty($email) || empty($password)) {
+        $_SESSION['error_message'] = "All fields are required!";
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $_SESSION['error_message'] = "Valid email is required!";
+    } elseif (strlen($password) < 8) {
+        $_SESSION['error_message'] = "Password must be at least 8 characters!";
+    } elseif ($password !== $confirm_password) {
+        $_SESSION['error_message'] = "Passwords do not match!";
+    } else {
+        $check_sql = "SELECT id FROM users WHERE email = ?";
+        $stmt = $conn->prepare($check_sql);
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $stmt->store_result();
+  
+        if ($stmt->num_rows > 0) {
+            $_SESSION['error_message'] = "Email already registered!";
+        } else {
+            $password_hash = password_hash($password, PASSWORD_DEFAULT);
+            $otp = random_int(100000, 999999);
+            $otp_expiry = date("Y-m-d H:i:s", time() + 60 * 10); 
+  
+            $sql = "INSERT INTO users (username, email, password, account_activation_hash, reset_token_expires_at) VALUES (?, ?, ?, ?, ?)";
+            $stmt = $conn->prepare($sql);
+            if ($stmt) {
+                $stmt->bind_param("sssss", $name, $email, $password_hash, $otp, $otp_expiry);
+                if ($stmt->execute()) {
+                    $mail->setFrom("noreply@example.com", "ManCave Gallery");
+                    $mail->addAddress($email);
+                    $mail->Subject = "Account Activation OTP";
+                    $mail->isHTML(true);
+                    $mail->Body = "<h3>Welcome to ManCave!</h3><p>Your activation code is: <b style='font-size:1.2em'>$otp</b></p>";
+                    try {
+                        $mail->send();
+                        $_SESSION['otp_email'] = $email;
+                        $_SESSION['success_message'] = "Registration successful! Check your email for the code.";
+                        $_SESSION['show_verify_modal'] = true; 
+                        header("Location: artwork_details.php?id=$id"); 
+                        exit;
+                    } catch (Exception $e) {
+                        $_SESSION['error_message'] = "Mailer Error: " . $mail->ErrorInfo;
+                    }
+                } else {
+                    $_SESSION['error_message'] = "Database Error.";
+                }
+            }
+        }
+    }
+    if(isset($_SESSION['error_message'])) {
+        header("Location: artwork_details.php?id=$id&signup=1");
+        exit();
+    }
+}
 
 // --- FETCH USER DATA (Profile Pic) ---
 $user_profile_pic = ""; 
@@ -108,6 +355,7 @@ if (empty($other_works)) {
             --radius: 4px;           
             --font-main: 'Nunito Sans', sans-serif;       
             --font-head: 'Playfair Display', serif; 
+            --font-script: 'Pacifico', cursive;
             --shadow-soft: 0 10px 40px -10px rgba(0,0,0,0.08);
             --shadow-hover: 0 20px 40px -5px rgba(0,0,0,0.15);
         }
@@ -127,7 +375,7 @@ if (empty($other_works)) {
         ul { list-style: none; }
 
         /* =========================================
-           HEADER UI
+           HEADER UI (MATCHING INDEX.PHP)
            ========================================= */
         .navbar {
             position: fixed; top: 0; width: 100%;
@@ -139,15 +387,24 @@ if (empty($other_works)) {
         }
         .nav-container { max-width: 1200px; margin: 0 auto; padding: 0 20px; display: flex; justify-content: space-between; align-items: center; }
 
+        /* Logo Styling */
         .logo { text-decoration: none; display: flex; gap: 8px; align-items: baseline; white-space: nowrap; }
-        .logo-top { font-family: var(--font-head); font-weight: 700; color: var(--primary); letter-spacing: 1px; font-size: 1rem; }
-        .logo-main { font-family: 'Pacifico', cursive; font-size: 1.8rem; transform: rotate(-2deg); margin: 0; color: var(--primary); }
+        .logo:hover { transform: scale(1.02); }
+        .logo-top { font-family: var(--font-head); font-weight: 700; color: var(--primary); letter-spacing: 1px; font-size: 1rem; margin-bottom: 0; }
+        .logo-main { font-family: var(--font-script); font-size: 1.8rem; transform: rotate(-2deg); margin: 0; padding:0; }
         .logo-red { color: #8B0000; } 
-        .logo-bottom { font-family: var(--font-main); font-size: 0.85rem; font-weight: 800; color: var(--primary); letter-spacing: 2px; text-transform: uppercase; }
+        .logo-text { color: var(--primary); }
+        .logo-bottom { font-family: var(--font-main); font-size: 0.85rem; font-weight: 800; color: var(--primary); letter-spacing: 2px; text-transform: uppercase; margin:0; }
 
         .nav-links { display: flex; gap: 30px; }
         .nav-links a { font-weight: 700; color: var(--primary); font-size: 1rem; position: relative; transition: color 0.3s; }
         .nav-links a:hover { color: var(--accent); }
+
+        /* Buttons */
+        .btn-nav { background: var(--primary); color: #fff; padding: 10px 25px; border-radius: 50px; border: none; cursor: pointer; font-weight: 700; margin-left: 15px; font-size: 0.9rem; transition: 0.3s; box-shadow: 0 3px 8px rgba(0,0,0,0.15); }
+        .btn-nav:hover { background: var(--accent); color: #fff; transform: translateY(-2px); }
+        .btn-nav-outline { background: transparent; color: var(--primary); border: 2px solid var(--primary); padding: 8px 20px; border-radius: 50px; font-weight: 700; cursor: pointer; font-size: 0.9rem; transition: 0.3s; }
+        .btn-nav-outline:hover { background: var(--primary); color: #fff; }
 
         .nav-actions { display: flex; align-items: center; gap: 15px; }
         .header-icon-btn {
@@ -404,11 +661,10 @@ if (empty($other_works)) {
         .art-title-new { font-size: 1.1rem; font-family: var(--font-head); color: var(--primary); margin-bottom: 5px; }
         .price-new { font-weight: 400; color: #888; font-size: 0.95rem; font-family: var(--font-main); }
         
-        /* Modals */
-        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.3s; z-index: 2000; }
+        /* Modals (Updated Styles) */
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); backdrop-filter: blur(5px); display: flex; align-items: center; justify-content: center; opacity: 0; visibility: hidden; transition: 0.3s; z-index: 2000; padding: 20px; }
         .modal-overlay.active { opacity: 1; visibility: visible; }
         
-        /* UPDATED MODAL STYLES TO MATCH INDEX.PHP */
         .modal-card { 
             background: var(--white); 
             padding: 35px; /* Slightly more padding */
@@ -431,12 +687,33 @@ if (empty($other_works)) {
         .modal-close { position: absolute; top: 20px; right: 20px; background: none; border: none; font-size: 1.8rem; cursor: pointer; color: #999; transition: 0.3s; line-height: 1; }
         .modal-close:hover { color: var(--brand-red); }
         
+        /* Auth Modal Specifics */
+        .modal-card.small { width: 420px; max-width: 95%; padding: 45px 35px; text-align: center; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+        .modal-header-icon { font-size: 3rem; color: var(--accent); margin-bottom: 20px; background: rgba(205, 133, 63, 0.1); width: 80px; height: 80px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+        .modal-card.small h3 { font-family: var(--font-head); font-size: 1.8rem; margin-bottom: 10px; color: var(--primary); }
+        .modal-card.small p { color: #666; margin-bottom: 30px; font-size: 0.95rem; }
+        
+        .friendly-input-group { position: relative; margin-bottom: 20px; text-align: left; }
+        .friendly-input-group i { position: absolute; top: 50%; left: 20px; transform: translateY(-50%); color: #bbb; font-size: 1.1rem; pointer-events: none; transition: 0.3s; }
+        .friendly-input-group input { width: 100%; padding: 14px 14px 14px 55px; border-radius: 50px; background: #f8f9fa; border: 1px solid #e9ecef; font-size: 0.95rem; transition: all 0.3s ease; outline: none; }
+        .friendly-input-group input:focus { background: #fff; border-color: var(--accent); box-shadow: 0 4px 15px rgba(243, 108, 33, 0.15); }
+        .friendly-input-group input:focus + i { color: var(--accent); }
+        
+        .btn-friendly { width: 100%; padding: 15px; border-radius: 50px; border: none; background: linear-gradient(135deg, var(--accent), #ff8c42); color: #fff; font-weight: 800; font-size: 1rem; cursor: pointer; transition: 0.3s; margin-top: 10px; box-shadow: 0 4px 15px rgba(243, 108, 33, 0.3); }
+        .btn-friendly:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(243, 108, 33, 0.4); }
+        
+        .modal-footer-link { margin-top: 25px; font-size: 0.9rem; color: #777; }
+        .modal-footer-link a { color: var(--accent); font-weight: 700; }
+        .alert-error { background: #ffe6e6; color: #d63031; padding: 12px; border-radius: 12px; font-size: 0.9rem; margin-bottom: 20px; border: 1px solid #fab1a0; text-align: left; display: flex; align-items: center; gap: 10px; }
+        .forgot-pass-link { text-decoration: none; color: #888; font-size: 0.85rem; font-weight: 600; transition: color 0.3s ease; }
+        .forgot-pass-link:hover { color: var(--accent); }
+
         .btn-full { width: 100%; background: var(--primary); color: var(--white); padding: 16px; border-radius: 4px; border: none; font-weight: 700; cursor: pointer; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px; transition: 0.3s; margin-top: 10px; }
         .btn-full:hover { background: #333; }
         
         .form-group { margin-bottom: 20px; }
         .form-group label { display: block; margin-bottom: 8px; font-weight: 700; font-size: 0.85rem; color: #444; text-transform: uppercase; letter-spacing: 0.5px; }
-        .form-group input, .form-group textarea { width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.95rem; background: #fafafa; transition: 0.3s; }
+        .form-group input:not(.friendly-input-group input), .form-group textarea { width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 4px; font-size: 0.95rem; background: #fafafa; transition: 0.3s; }
         .form-group input:focus, .form-group textarea:focus { background: #fff; border-color: var(--primary); outline: none; }
 
         @media (max-width: 900px) {
@@ -505,7 +782,8 @@ if (empty($other_works)) {
                         </div>
                     </div>
                 <?php else: ?>
-                    <a href="index.php?login=1" class="btn-nav">Sign In</a>
+                    <button id="openSignupBtn" class="btn-nav-outline">Sign Up</button>
+                    <button id="openLoginBtn" class="btn-nav">Sign In</button>
                 <?php endif; ?>
             </div>
             <div class="mobile-menu-icon"><i class="fas fa-bars"></i></div>
@@ -649,6 +927,152 @@ if (empty($other_works)) {
     </section>
     <?php endif; ?>
 
+    <div class="modal-overlay" id="loginModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-user-circle"></i></div>
+            <h3>Welcome Back</h3>
+            <p>Sign in to continue to your account</p>
+            <?php if(isset($_SESSION['error_message']) && isset($_GET['login'])): ?>
+                <div class="alert-error">
+                    <i class="fas fa-exclamation-circle"></i> 
+                    <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+            <form action="" method="POST"> 
+                <div class="friendly-input-group">
+                    <input type="text" name="identifier" required placeholder="Username or Email">
+                    <i class="fas fa-user"></i>
+                </div>
+                <div class="friendly-input-group" style="margin-bottom:10px;">
+                    <input type="password" name="password" required placeholder="Password">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <div style="text-align: right; margin-bottom: 20px;">
+                    <a href="#" class="forgot-pass-link" id="openForgotBtn">Forgot Password?</a>
+                </div>
+                <button type="submit" name="login" class="btn-friendly">Sign In</button>
+                <div class="modal-footer-link">
+                    Don't have an account? <a href="#" id="switchRegister">Sign Up</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="signupModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-rocket"></i></div>
+            <h3>Join The Club</h3>
+            <p>Create an account to reserve unique art</p>
+            <?php if(isset($_SESSION['error_message']) && isset($_GET['signup'])): ?>
+                <div class="alert-error">
+                    <i class="fas fa-exclamation-circle"></i> 
+                    <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+            <form action="" method="POST"> 
+                <div class="friendly-input-group">
+                    <input type="text" name="username" required placeholder="Username">
+                    <i class="fas fa-user"></i>
+                </div>
+                <div class="friendly-input-group">
+                    <input type="email" name="email" required placeholder="Email Address">
+                    <i class="fas fa-envelope"></i>
+                </div>
+                <div class="friendly-input-group">
+                    <input type="password" name="password" required placeholder="Password (Min 8 chars)">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <div class="friendly-input-group">
+                    <input type="password" name="confirm_password" required placeholder="Confirm Password">
+                    <i class="fas fa-check-circle"></i>
+                </div>
+                <button type="submit" name="sign" class="btn-friendly">Create Account</button>
+                <div class="modal-footer-link">
+                    Already a member? <a href="#" id="switchLogin">Log In</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="forgotModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-key"></i></div>
+            <h3>Forgot Password</h3>
+            <p>Enter your email to receive an OTP code.</p>
+            <form id="forgotForm">
+                <div class="friendly-input-group">
+                    <input type="email" id="resetEmail" name="email" required placeholder="Email Address">
+                    <i class="fas fa-envelope"></i>
+                </div>
+                <button type="submit" class="btn-friendly">Send OTP</button>
+                <div class="modal-footer-link">Remembered it? <a href="#" class="switchBackToLogin">Log In</a></div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="resetOtpModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-shield-alt"></i></div>
+            <h3>Verify Code</h3>
+            <p>Enter the 6-digit code sent to your email.</p>
+            <form id="resetOtpForm">
+                <div class="friendly-input-group">
+                    <input type="text" id="otpCode" name="otp" required placeholder="123456" maxlength="6" style="letter-spacing:5px; text-align:center; font-weight:700; font-size:1.2rem;">
+                    <i class="fas fa-key"></i>
+                </div>
+                <button type="submit" class="btn-friendly">Verify Code</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="newPasswordModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-lock-open"></i></div>
+            <h3>New Password</h3>
+            <p>Create a secure new password for your account.</p>
+            <form id="newPasswordForm">
+                <div class="friendly-input-group">
+                    <input type="password" id="newPass" name="new_password" required placeholder="New Password">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <div class="friendly-input-group">
+                    <input type="password" id="confirmPass" name="confirm_password" required placeholder="Confirm Password">
+                    <i class="fas fa-check"></i>
+                </div>
+                <button type="submit" class="btn-friendly">Reset Password</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="verifyAccountModal">
+        <div class="modal-card small">
+            <button class="modal-close">×</button>
+            <div class="modal-header-icon"><i class="fas fa-check-circle"></i></div>
+            <h3>Verify Account</h3>
+            <p>Enter the 6-digit code sent to <?php echo htmlspecialchars($_SESSION['otp_email'] ?? 'your email'); ?>.</p>
+            
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_verify_modal'])): ?>
+                <div class="alert-error">
+                    <i class="fas fa-exclamation-circle"></i> 
+                    <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+
+            <form method="POST">
+                <div class="friendly-input-group">
+                    <input type="text" name="otp" required placeholder="000000" maxlength="6" style="text-align:center; letter-spacing:5px; font-weight:700; font-size:1.2rem;">
+                    <i class="fas fa-key"></i>
+                </div>
+                <button type="submit" name="verify_account" class="btn-friendly">Verify Now</button>
+            </form>
+        </div>
+    </div>
+
     <div class="modal-overlay" id="reserveModal">
         <div class="modal-card">
             <button class="modal-close" onclick="closeModal()">&times;</button>
@@ -691,7 +1115,7 @@ if (empty($other_works)) {
                 <?php if($loggedIn): ?>
                     <button type="submit" name="submit_reservation" class="btn-full">Confirm Reservation</button>
                 <?php else: ?>
-                    <a href="index.php?login=1" class="btn-full" style="display:block; text-align:center; text-decoration:none;">Log In to Reserve</a>
+                    <button type="button" class="btn-full" onclick="closeModal(); document.getElementById('loginModal').classList.add('active');">Log In to Reserve</button>
                 <?php endif; ?>
             </form>
         </div>
@@ -728,17 +1152,19 @@ if (empty($other_works)) {
         // 1. Zoom Logic
         const zoomFrame = document.getElementById('zoomFrame');
         const mainImage = document.getElementById('mainImage');
-        zoomFrame.addEventListener('mousemove', function(e) {
-            const { left, top, width, height } = zoomFrame.getBoundingClientRect();
-            const x = (e.clientX - left) / width * 100;
-            const y = (e.clientY - top) / height * 100;
-            mainImage.style.transformOrigin = `${x}% ${y}%`;
-            mainImage.style.transform = "scale(2)";
-        });
-        zoomFrame.addEventListener('mouseleave', function() { 
-            mainImage.style.transform = "scale(1)"; 
-            setTimeout(() => { mainImage.style.transformOrigin = 'center center'; }, 100);
-        });
+        if (zoomFrame && mainImage) {
+            zoomFrame.addEventListener('mousemove', function(e) {
+                const { left, top, width, height } = zoomFrame.getBoundingClientRect();
+                const x = (e.clientX - left) / width * 100;
+                const y = (e.clientY - top) / height * 100;
+                mainImage.style.transformOrigin = `${x}% ${y}%`;
+                mainImage.style.transform = "scale(2)";
+            });
+            zoomFrame.addEventListener('mouseleave', function() { 
+                mainImage.style.transform = "scale(1)"; 
+                setTimeout(() => { mainImage.style.transformOrigin = 'center center'; }, 100);
+            });
+        }
 
         // 2. Switch Image
         function switchImage(src, element) {
@@ -749,7 +1175,10 @@ if (empty($other_works)) {
 
         // 3. Heart Logic
         function toggleFavorite(btn, id) {
-            if (!isLoggedIn) { window.location.href = 'index.php?login=1'; return; }
+            if (!isLoggedIn) { 
+                document.getElementById('loginModal').classList.add('active'); 
+                return; 
+            }
             
             const icon = btn.querySelector('i');
             const isLiked = btn.classList.contains('active');
@@ -771,21 +1200,138 @@ if (empty($other_works)) {
         // 4. Modal Logic
         const reserveModal = document.getElementById('reserveModal');
         const copyModal = document.getElementById('copyModal');
+        const loginModal = document.getElementById('loginModal');
+        const signupModal = document.getElementById('signupModal');
+        const forgotModal = document.getElementById('forgotModal');
+        const resetOtpModal = document.getElementById('resetOtpModal');
+        const newPasswordModal = document.getElementById('newPasswordModal');
+        const verifyAccountModal = document.getElementById('verifyAccountModal');
+        const closeBtns = document.querySelectorAll('.modal-close');
 
         function closeModal() { 
             document.querySelectorAll('.modal-overlay').forEach(el => el.classList.remove('active'));
         }
+        closeBtns.forEach(btn => btn.addEventListener('click', closeModal));
+        window.addEventListener('click', (e) => { if (e.target.classList.contains('modal-overlay')) closeModal(); });
+
+        document.getElementById('openLoginBtn')?.addEventListener('click', () => { closeModal(); loginModal.classList.add('active'); });
+        document.getElementById('openSignupBtn')?.addEventListener('click', () => { closeModal(); signupModal.classList.add('active'); });
+        document.getElementById('switchRegister')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); signupModal.classList.add('active'); });
+        document.getElementById('switchLogin')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); loginModal.classList.add('active'); });
+        document.getElementById('openForgotBtn')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); forgotModal.classList.add('active'); });
+        document.querySelectorAll('.switchBackToLogin').forEach(btn => {
+            btn.addEventListener('click', (e) => { e.preventDefault(); closeModal(); loginModal.classList.add('active'); });
+        });
+
+        // Trigger Modals from PHP logic
+        <?php if(isset($_GET['login'])): ?> loginModal.classList.add('active'); <?php endif; ?>
+        <?php if(isset($_GET['signup'])): ?> signupModal.classList.add('active'); <?php endif; ?>
+        <?php if(isset($_SESSION['show_verify_modal'])): ?>
+            verifyAccountModal.classList.add('active');
+            <?php unset($_SESSION['show_verify_modal']); ?>
+        <?php endif; ?>
 
         window.openReserveModal = function(id, title) {
+            if (!isLoggedIn) {
+                closeModal();
+                loginModal.classList.add('active');
+                return;
+            }
             document.getElementById('res_art_id').value = id;
             document.getElementById('res_art_title').value = title;
             reserveModal.classList.add('active');
         }
 
         window.openCopyModal = function(title) {
+            if (!isLoggedIn) {
+                closeModal();
+                loginModal.classList.add('active');
+                return;
+            }
             document.getElementById('copyMessage').value = "Hello, I am interested in requesting a copy or similar commission of the artwork: \"" + title + "\". Please contact me with details.";
             copyModal.classList.add('active');
         }
+
+        // --- FORGOT PASSWORD AJAX ---
+        let resetEmail = '';
+        document.getElementById('forgotForm')?.addEventListener('submit', function(e) {
+            e.preventDefault();
+            resetEmail = document.getElementById('resetEmail').value;
+            const btn = this.querySelector('button');
+            const originalText = btn.innerHTML;
+            btn.disabled = true; btn.innerHTML = 'Sending...';
+
+            const formData = new FormData();
+            formData.append('ajax_action', 'send_reset_otp');
+            formData.append('email', resetEmail);
+
+            fetch('', { method: 'POST', body: formData }) 
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false; btn.innerHTML = originalText;
+                if(data.status === 'success') {
+                    forgotModal.classList.remove('active');
+                    resetOtpModal.classList.add('active');
+                } else {
+                    alert(data.message);
+                }
+            }).catch(() => { btn.disabled = false; btn.innerHTML = originalText; alert('Error sending request.'); });
+        });
+
+        document.getElementById('resetOtpForm')?.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const otp = document.getElementById('otpCode').value;
+            const btn = this.querySelector('button');
+            const originalText = btn.innerHTML;
+            btn.disabled = true; btn.innerHTML = 'Verifying...';
+
+            const formData = new FormData();
+            formData.append('ajax_action', 'verify_reset_otp');
+            formData.append('email', resetEmail);
+            formData.append('otp', otp);
+
+            fetch('', { method: 'POST', body: formData }) 
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false; btn.innerHTML = originalText;
+                if(data.status === 'success') {
+                    resetOtpModal.classList.remove('active');
+                    newPasswordModal.classList.add('active');
+                } else {
+                    alert(data.message);
+                }
+            });
+        });
+
+        document.getElementById('newPasswordForm')?.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const newPass = document.getElementById('newPass').value;
+            const confirmPass = document.getElementById('confirmPass').value;
+            const otp = document.getElementById('otpCode').value; 
+            const btn = this.querySelector('button');
+            const originalText = btn.innerHTML;
+            btn.disabled = true; btn.innerHTML = 'Resetting...';
+
+            const formData = new FormData();
+            formData.append('ajax_action', 'reset_password');
+            formData.append('email', resetEmail);
+            formData.append('otp', otp);
+            formData.append('new_password', newPass);
+            formData.append('confirm_password', confirmPass);
+
+            fetch('', { method: 'POST', body: formData }) 
+            .then(r => r.json())
+            .then(data => {
+                btn.disabled = false; btn.innerHTML = originalText;
+                if(data.status === 'success') {
+                    alert('Password reset successful! You can now log in.');
+                    closeModal();
+                    loginModal.classList.add('active');
+                } else {
+                    alert(data.message);
+                }
+            });
+        });
 
         // 5. Header Logic
         document.addEventListener('DOMContentLoaded', () => {
@@ -813,25 +1359,32 @@ if (empty($other_works)) {
                 
                 fetch('fetch_notifications.php').then(r=>r.json()).then(d=>{
                     if(d.status==='success' && d.unread_count > 0) {
-                        document.getElementById('notifBadge').style.display='block';
-                        document.getElementById('notifBadge').innerText=d.unread_count;
-                        let list = document.getElementById('notifList');
-                        list.innerHTML='';
-                        d.notifications.forEach(n=>{
-                            list.innerHTML+=`
-                                <li class="notif-item">
-                                    <div class="notif-msg">${n.message}</div>
-                                    <button class="btn-notif-close">×</button>
-                                </li>`;
-                            list.lastElementChild.querySelector('.btn-notif-close').addEventListener('click', (e) => {
-                                e.stopPropagation();
-                                if(confirm('Delete notification?')) {
+                        if(notifBadge) {
+                            notifBadge.style.display='block';
+                            notifBadge.innerText=d.unread_count;
+                        }
+                        if(notifList) {
+                            notifList.innerHTML='';
+                            d.notifications.forEach(n=>{
+                                const li = document.createElement('li');
+                                li.className = `notif-item ${n.is_read == 0 ? 'unread' : ''}`;
+                                li.innerHTML = `<div class="notif-msg">${n.message}</div><button class="btn-notif-close">×</button>`;
+                                li.querySelector('.btn-notif-close').addEventListener('click', (e) => {
+                                    e.stopPropagation();
+                                    if(confirm('Delete notification?')) {
+                                        const fd = new FormData(); fd.append('id', n.id);
+                                        fetch('delete_notifications.php', {method:'POST', body:fd})
+                                            .then(r=>r.json()).then(d=>{ if(d.status==='success') location.reload(); });
+                                    }
+                                });
+                                li.addEventListener('click', (e) => {
+                                    if (e.target.classList.contains('btn-notif-close')) return;
                                     const fd = new FormData(); fd.append('id', n.id);
-                                    fetch('delete_notifications.php', {method:'POST', body:fd})
-                                        .then(r=>r.json()).then(d=>{ if(d.status==='success') location.reload(); });
-                                }
+                                    fetch('mark_as_read.php', { method:'POST', body:fd }).then(() => location.reload());
+                                });
+                                notifList.appendChild(li);
                             });
-                        });
+                        }
                     }
                 });
             }
@@ -840,41 +1393,6 @@ if (empty($other_works)) {
                 if(userDropdown) userDropdown.classList.remove('active');
             });
         });
-
-        // --- FAVORITES & CART ANIMATION ---
-        window.toggleFavorite = function(btn, id) {
-            if(!isLoggedIn) { loginModal.classList.add('active'); return; }
-            
-            const icon = btn.querySelector('i');
-            const countSpan = btn.querySelector('.fav-count');
-            const isLiked = btn.classList.contains('active');
-            const action = isLiked ? 'remove_id' : 'add_id';
-
-            btn.classList.add('animating');
-            
-            let count = parseInt(countSpan.innerText);
-            if(isLiked) {
-                btn.classList.remove('active');
-                icon.classList.remove('fas'); icon.classList.add('far');
-                count = Math.max(0, count - 1);
-            } else {
-                btn.classList.add('active');
-                icon.classList.remove('far'); icon.classList.add('fas');
-                count++;
-            }
-            countSpan.innerText = count;
-
-            const formData = new FormData();
-            formData.append(action, id);
-            fetch('favorites.php', { method: 'POST', body: formData }); 
-
-            setTimeout(() => btn.classList.remove('animating'), 400);
-        }
-
-        window.animateCart = function(btn) {
-            btn.classList.add('animating');
-            setTimeout(() => btn.classList.remove('animating'), 300);
-        }
     </script>
 </body>
 </html>
