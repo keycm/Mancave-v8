@@ -318,6 +318,19 @@ if (empty($other_works)) {
         .art-price-lg { font-family: var(--font-main); font-size: 2rem; font-weight: 300; color: var(--primary); }
         .price-label { text-transform: uppercase; font-size: 0.8rem; color: #999; font-weight: 700; letter-spacing: 1px; }
 
+        /* NEW: Specs Grid Style */
+        .specs-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+            padding-bottom: 25px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .specs-item { display: flex; flex-direction: column; }
+        .specs-label { font-size: 0.75rem; text-transform: uppercase; color: #999; font-weight: 700; letter-spacing: 1px; margin-bottom: 4px; }
+        .specs-value { font-size: 1rem; color: var(--primary); font-weight: 600; }
+
         .desc-section { margin-bottom: 40px; }
         .desc-label { font-weight: 700; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1.5px; color: var(--accent); display: block; margin-bottom: 12px; }
         .desc-text { font-size: 1rem; line-height: 1.7; color: #555; font-weight: 300; }
@@ -547,6 +560,38 @@ if (empty($other_works)) {
                     <div class="art-price-lg">Php <?php echo number_format($artwork['price']); ?></div>
                 </div>
 
+                <?php if(!empty($artwork['category']) || !empty($artwork['medium']) || !empty($artwork['year']) || !empty($artwork['size'])): ?>
+                <div class="specs-grid">
+                    <?php if(!empty($artwork['category'])): ?>
+                    <div class="specs-item">
+                        <span class="specs-label">Category</span>
+                        <span class="specs-value"><?php echo htmlspecialchars($artwork['category']); ?></span>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if(!empty($artwork['medium'])): ?>
+                    <div class="specs-item">
+                        <span class="specs-label">Medium</span>
+                        <span class="specs-value"><?php echo htmlspecialchars($artwork['medium']); ?></span>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if(!empty($artwork['year'])): ?>
+                    <div class="specs-item">
+                        <span class="specs-label">Year</span>
+                        <span class="specs-value"><?php echo htmlspecialchars($artwork['year']); ?></span>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if(!empty($artwork['size'])): ?>
+                    <div class="specs-item">
+                        <span class="specs-label">Dimensions</span>
+                        <span class="specs-value"><?php echo htmlspecialchars($artwork['size']); ?></span>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                <?php endif; ?>
+
                 <div class="desc-section">
                     <span class="desc-label">About the Artwork</span>
                     <p class="desc-text">
@@ -756,14 +801,14 @@ if (empty($other_works)) {
                 profilePill.addEventListener('click', (e) => {
                     e.stopPropagation();
                     userDropdown.classList.toggle('active');
-                    if(notifDropdown) notifDropdown.classList.remove('active');
+                    if (notifDropdown) notifDropdown.classList.remove('active');
                 });
             }
             if (notifBtn) {
                 notifBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     notifDropdown.classList.toggle('active');
-                    if(userDropdown) userDropdown.classList.remove('active');
+                    if (userDropdown) userDropdown.classList.remove('active');
                 });
                 
                 fetch('fetch_notifications.php').then(r=>r.json()).then(d=>{
@@ -795,6 +840,41 @@ if (empty($other_works)) {
                 if(userDropdown) userDropdown.classList.remove('active');
             });
         });
+
+        // --- FAVORITES & CART ANIMATION ---
+        window.toggleFavorite = function(btn, id) {
+            if(!isLoggedIn) { loginModal.classList.add('active'); return; }
+            
+            const icon = btn.querySelector('i');
+            const countSpan = btn.querySelector('.fav-count');
+            const isLiked = btn.classList.contains('active');
+            const action = isLiked ? 'remove_id' : 'add_id';
+
+            btn.classList.add('animating');
+            
+            let count = parseInt(countSpan.innerText);
+            if(isLiked) {
+                btn.classList.remove('active');
+                icon.classList.remove('fas'); icon.classList.add('far');
+                count = Math.max(0, count - 1);
+            } else {
+                btn.classList.add('active');
+                icon.classList.remove('far'); icon.classList.add('fas');
+                count++;
+            }
+            countSpan.innerText = count;
+
+            const formData = new FormData();
+            formData.append(action, id);
+            fetch('favorites.php', { method: 'POST', body: formData }); 
+
+            setTimeout(() => btn.classList.remove('animating'), 400);
+        }
+
+        window.animateCart = function(btn) {
+            btn.classList.add('animating');
+            setTimeout(() => btn.classList.remove('animating'), 300);
+        }
     </script>
 </body>
 </html>
